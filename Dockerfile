@@ -6,8 +6,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Install alass (subtitle aligner)
-# Download pre-built binary
+# Install alass (subtitle aligner - fallback)
 RUN wget -q https://github.com/kaegi/alass/releases/download/v2.0.0/alass-linux64 -O /usr/local/bin/alass \
     && chmod +x /usr/local/bin/alass
 
@@ -17,6 +16,9 @@ WORKDIR /app
 # Copy requirements first for caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install ffsubsync (more accurate than alass)
+RUN pip install --no-cache-dir ffsubsync
 
 # Copy application code
 COPY main.py .

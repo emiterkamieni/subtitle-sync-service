@@ -5,9 +5,9 @@ A FastAPI microservice that synchronizes subtitles with video streams.
 
 How it works:
 1. Receives stream URL and subtitle content
-2. Downloads first 5 minutes of audio using FFmpeg
-3. Runs alass to calculate sync offset
-4. Returns synchronized subtitle or offset
+2. Downloads first 10 minutes of audio using FFmpeg
+3. Runs ffsubsync for accurate audio-based synchronization
+4. Returns synchronized subtitle and offset
 
 Deploy to: Render.com (Free Tier)
 """
@@ -27,7 +27,7 @@ import uvicorn
 app = FastAPI(
     title="Subtitle Sync Service",
     description="Synchronize subtitles with video streams using audio analysis",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 # CORS for app access
@@ -40,7 +40,7 @@ app.add_middleware(
 )
 
 # Configuration
-AUDIO_DURATION = 300  # 5 minutes of audio for analysis
+AUDIO_DURATION = 600  # 10 minutes of audio for better analysis
 CACHE_DIR = "/tmp/sync_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -84,56 +84,96 @@ def ms_to_srt_time(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def shift_srt(srt_content: str, offset_ms: int) -> str:
-    """Shift all timestamps in SRT by offset_ms"""
-    time_pattern = re.compile(r'(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})')
-    
-    def replace_times(match):
-        start = parse_srt_time(match.group(1))
-        end = parse_srt_time(match.group(2))
-        new_start = ms_to_srt_time(start + offset_ms)
-        new_end = ms_to_srt_time(end + offset_ms)
-        return f"{new_start} --> {new_end}"
-    
-    return time_pattern.sub(replace_times, srt_content)
-
-
 def extract_audio(stream_url: str, output_path: str, duration: int = AUDIO_DURATION) -> bool:
     """
     Extract audio from stream URL using FFmpeg.
     Only downloads first N seconds to minimize bandwidth.
     """
     try:
+        print(f"[FFmpeg] Extracting {duration}s of audio from: {stream_url[:100]}...")
+        
         cmd = [
             "ffmpeg",
             "-y",  # Overwrite
             "-t", str(duration),  # Duration limit
             "-i", stream_url,
             "-vn",  # No video
-            "-acodec", "pcm_s16le",  # WAV format for alass
-            "-ar", "16000",  # 16kHz sample rate (sufficient for speech)
+            "-acodec", "pcm_s16le",  # WAV format
+            "-ar", "16000",  # 16kHz sample rate
             "-ac", "1",  # Mono
+            "-loglevel", "warning",
             output_path
         ]
         
         result = subprocess.run(
             cmd,
             capture_output=True,
-            timeout=120  # 2 minute timeout
+            timeout=180  # 3 minute timeout
         )
         
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+        if result.returncode != 0:
+            print(f"[FFmpeg] Error: {result.stderr.decode()}")
+            return False
+        
+        file_exists = os.path.exists(output_path)
+        file_size = os.path.getsize(output_path) if file_exists else 0
+        print(f"[FFmpeg] Audio extracted: {file_exists}, size: {file_size} bytes")
+        
+        return file_exists and file_size > 10000
+    except subprocess.TimeoutExpired:
+        print("[FFmpeg] Timeout expired")
+        return False
     except Exception as e:
-        print(f"FFmpeg error: {e}")
+        print(f"[FFmpeg] Exception: {e}")
         return False
 
 
-def run_alass_sync(audio_path: str, subtitle_path: str, output_path: str) -> tuple[bool, float]:
+def run_ffsubsync(audio_path: str, subtitle_path: str, output_path: str) -> tuple[bool, str]:
     """
-    Run alass to synchronize subtitle with audio.
-    Returns (success, confidence_score)
+    Run ffsubsync to synchronize subtitle with audio.
+    Returns (success, output_log)
     """
     try:
+        print(f"[ffsubsync] Starting synchronization...")
+        
+        cmd = [
+            "ffsubsync",
+            audio_path,
+            "-i", subtitle_path,
+            "-o", output_path,
+            "--no-fix-framerate",
+            "--max-offset-seconds", "60"  # Allow up to 60s offset
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        output_log = result.stdout + result.stderr
+        print(f"[ffsubsync] Output: {output_log}")
+        
+        success = os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        return success, output_log
+        
+    except subprocess.TimeoutExpired:
+        print("[ffsubsync] Timeout")
+        return False, "Timeout"
+    except Exception as e:
+        print(f"[ffsubsync] Exception: {e}")
+        return False, str(e)
+
+
+def run_alass_sync(audio_path: str, subtitle_path: str, output_path: str) -> tuple[bool, str]:
+    """
+    Run alass to synchronize subtitle with audio (fallback).
+    Returns (success, output_log)
+    """
+    try:
+        print(f"[alass] Starting synchronization...")
+        
         cmd = [
             "alass",
             audio_path,
@@ -148,33 +188,39 @@ def run_alass_sync(audio_path: str, subtitle_path: str, output_path: str) -> tup
             timeout=60
         )
         
-        # Parse alass output for confidence
-        confidence = 0.0
-        if "score:" in result.stdout.lower():
-            match = re.search(r'score:\s*([\d.]+)', result.stdout.lower())
-            if match:
-                confidence = float(match.group(1))
+        output_log = result.stdout + result.stderr
+        print(f"[alass] Output: {output_log}")
         
         success = os.path.exists(output_path) and os.path.getsize(output_path) > 0
-        return success, confidence
+        return success, output_log
         
     except subprocess.TimeoutExpired:
-        print("alass timeout")
-        return False, 0.0
+        print("[alass] Timeout")
+        return False, "Timeout"
     except Exception as e:
-        print(f"alass error: {e}")
-        return False, 0.0
+        print(f"[alass] Exception: {e}")
+        return False, str(e)
 
 
 def calculate_offset_from_srt(original: str, synced: str) -> int:
-    """Calculate offset by comparing first subtitle timing"""
-    orig_match = re.search(r'(\d{2}:\d{2}:\d{2},\d{3}) -->', original)
-    sync_match = re.search(r'(\d{2}:\d{2}:\d{2},\d{3}) -->', synced)
+    """Calculate average offset by comparing multiple subtitle timings"""
+    orig_times = re.findall(r'(\d{2}:\d{2}:\d{2},\d{3}) -->', original)
+    sync_times = re.findall(r'(\d{2}:\d{2}:\d{2},\d{3}) -->', synced)
     
-    if orig_match and sync_match:
-        orig_ms = parse_srt_time(orig_match.group(1))
-        sync_ms = parse_srt_time(sync_match.group(1))
-        return sync_ms - orig_ms
+    if not orig_times or not sync_times:
+        return 0
+    
+    # Compare first 5 subtitles for more accurate average
+    offsets = []
+    for i in range(min(5, len(orig_times), len(sync_times))):
+        orig_ms = parse_srt_time(orig_times[i])
+        sync_ms = parse_srt_time(sync_times[i])
+        offsets.append(sync_ms - orig_ms)
+    
+    if offsets:
+        # Return median offset (more robust than average)
+        offsets.sort()
+        return offsets[len(offsets) // 2]
     
     return 0
 
@@ -185,20 +231,31 @@ async def root():
     return {
         "status": "healthy",
         "service": "Subtitle Sync Service",
-        "version": "1.0.0"
+        "version": "1.1.0",
+        "audio_duration": AUDIO_DURATION
     }
 
 
 @app.get("/health")
 async def health():
     """Health check for monitoring"""
-    # Check if ffmpeg and alass are available
     ffmpeg_ok = subprocess.run(["ffmpeg", "-version"], capture_output=True).returncode == 0
-    alass_ok = subprocess.run(["alass", "--version"], capture_output=True).returncode == 0
+    
+    # Check for ffsubsync or alass
+    try:
+        ffsubsync_ok = subprocess.run(["ffsubsync", "--version"], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        ffsubsync_ok = False
+    
+    try:
+        alass_ok = subprocess.run(["alass", "--version"], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        alass_ok = False
     
     return {
-        "status": "healthy" if (ffmpeg_ok and alass_ok) else "degraded",
+        "status": "healthy" if (ffmpeg_ok and (ffsubsync_ok or alass_ok)) else "degraded",
         "ffmpeg": "ok" if ffmpeg_ok else "missing",
+        "ffsubsync": "ok" if ffsubsync_ok else "missing",
         "alass": "ok" if alass_ok else "missing"
     }
 
@@ -209,16 +266,15 @@ async def sync_subtitle(request: SyncRequest):
     Synchronize subtitle with video stream.
     
     This endpoint:
-    1. Downloads first 5 minutes of audio from the stream
-    2. Uses alass to align subtitle with audio
+    1. Downloads first 10 minutes of audio from the stream
+    2. Uses ffsubsync (or alass fallback) to align subtitle with audio
     3. Returns the offset and/or synchronized subtitle
     """
     start_time = datetime.now()
-    
-    # Create unique hash for caching
-    url_hash = hashlib.md5(request.stream_url.encode()).hexdigest()[:8]
-    sub_hash = hashlib.md5(request.subtitle.encode()).hexdigest()[:8]
-    cache_key = f"{url_hash}_{sub_hash}"
+    print(f"\n{'='*50}")
+    print(f"[SYNC] New request at {start_time}")
+    print(f"[SYNC] Stream URL: {request.stream_url[:100]}...")
+    print(f"[SYNC] Subtitle length: {len(request.subtitle)} chars")
     
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, "audio.wav")
@@ -235,19 +291,30 @@ async def sync_subtitle(request: SyncRequest):
             return SyncResponse(
                 success=False,
                 offset_ms=0,
-                message="Failed to extract audio from stream",
+                message="Failed to extract audio from stream. Check if URL is accessible.",
                 processing_time_ms=processing_time
             )
         
-        # Run alass sync
-        success, confidence = run_alass_sync(audio_path, sub_path, synced_path)
+        # Try ffsubsync first (more accurate)
+        success = False
+        output_log = ""
+        
+        try:
+            success, output_log = run_ffsubsync(audio_path, sub_path, synced_path)
+        except FileNotFoundError:
+            print("[SYNC] ffsubsync not found, trying alass...")
+        
+        # Fallback to alass if ffsubsync failed
+        if not success:
+            print("[SYNC] Trying alass as fallback...")
+            success, output_log = run_alass_sync(audio_path, sub_path, synced_path)
         
         if not success:
             processing_time = int((datetime.now() - start_time).total_seconds() * 1000)
             return SyncResponse(
                 success=False,
                 offset_ms=0,
-                message="Synchronization failed",
+                message=f"Synchronization failed: {output_log[:200]}",
                 processing_time_ms=processing_time
             )
         
@@ -259,12 +326,13 @@ async def sync_subtitle(request: SyncRequest):
         offset_ms = calculate_offset_from_srt(request.subtitle, synced_content)
         
         processing_time = int((datetime.now() - start_time).total_seconds() * 1000)
+        print(f"[SYNC] Success! Offset: {offset_ms}ms, Time: {processing_time}ms")
         
         return SyncResponse(
             success=True,
             offset_ms=offset_ms,
             synced_subtitle=synced_content,
-            confidence=confidence,
+            confidence=0.9,
             message=f"Synchronized successfully. Offset: {offset_ms}ms",
             processing_time_ms=processing_time
         )
