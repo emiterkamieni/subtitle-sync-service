@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: subtitle-sync-service
+    env: docker
+    plan: free
+    branch: main
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
