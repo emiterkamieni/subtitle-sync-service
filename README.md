@@ -1,27 +1,75 @@
-# Subtitle Sync Service
+# 🎬 Subtitle Sync Service
 
-🎬 **FastAPI microservice for automatic subtitle synchronization**
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
 
-This service synchronizes subtitles with video streams using audio analysis.
-Designed for use with CinemaVOD Android TV application.
+**FastAPI microservice for automatic subtitle synchronization with video streams.**
 
-## How it works
+Uses audio analysis (speech detection) to perfectly align subtitles with video content. Designed for use with streaming applications like CinemaVOD.
 
-1. **Audio Extraction**: Downloads first 5 minutes of audio from video stream
-2. **Analysis**: Uses `alass` (fast subtitle aligner) to detect speech patterns
-3. **Synchronization**: Calculates offset and shifts subtitle timestamps
-4. **Response**: Returns offset in milliseconds and/or synced subtitle
+## ✨ Features
 
-## API Endpoints
+- 🎵 **Audio-based sync** - Uses FFSubSync for accurate speech detection
+- 🌐 **Stream support** - Works with any video URL (HLS, MP4, etc.)
+- ⚡ **REST API** - Simple POST endpoint for integration
+- 🔄 **Fallback support** - Uses alass as fallback if FFSubSync fails
+- 📊 **Offset calculation** - Returns offset in milliseconds for easy integration
+
+## 🔧 How it works
+
+```
+┌─────────────────────┐
+│   Your App          │
+│   (Android/iOS/Web) │
+└──────────┬──────────┘
+           │ POST /sync
+           │ {stream_url, subtitle}
+           ▼
+┌─────────────────────┐
+│   Sync Service      │
+│                     │
+│ 1. FFmpeg extracts  │
+│    10min of audio   │
+│                     │
+│ 2. FFSubSync        │
+│    analyzes speech  │
+│    patterns         │
+│                     │
+│ 3. Returns synced   │
+│    subtitle/offset  │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ Response:           │
+│ - offset_ms: -1500  │
+│ - synced_subtitle   │
+│ - confidence        │
+└─────────────────────┘
+```
+
+## 📡 API Endpoints
 
 ### `GET /` - Health check
-Returns service status.
+```json
+{
+  "status": "healthy",
+  "service": "Subtitle Sync Service",
+  "version": "1.1.0"
+}
+```
 
 ### `GET /health` - Detailed health
-Checks if FFmpeg and alass are available.
+```json
+{
+  "status": "healthy",
+  "ffmpeg": "ok",
+  "ffsubsync": "ok",
+  "alass": "ok"
+}
+```
 
-### `POST /sync` - Full sync
-Synchronizes subtitle with video stream.
+### `POST /sync` - Full synchronization
+Synchronizes subtitle with video stream. Returns full synced subtitle.
 
 **Request:**
 ```json
@@ -38,71 +86,125 @@ Synchronizes subtitle with video stream.
   "success": true,
   "offset_ms": -1500,
   "synced_subtitle": "1\n00:00:02,500 --> 00:00:05,500\nHello world\n\n...",
-  "confidence": 0.92,
+  "confidence": 0.9,
   "message": "Synchronized successfully. Offset: -1500ms",
-  "processing_time_ms": 12500
+  "processing_time_ms": 45000
 }
 ```
 
-### `POST /offset` - Offset only
-Same as `/sync` but returns only the offset, not full subtitle (lighter response).
+### `POST /offset` - Offset only (lightweight)
+Same as `/sync` but returns only offset, not full subtitle. Better for mobile apps.
 
-## Deployment on Render.com (FREE)
+## 🚀 Deployment
 
-### Step 1: Create GitHub Repository
+### Deploy to Render.com (Free Tier)
 
+1. **Fork this repository**
+
+2. **Go to [render.com](https://render.com)** and sign up
+
+3. **Create new Web Service:**
+   - Connect your GitHub repository
+   - Render will auto-detect `render.yaml`
+   - Select **Free** plan
+   - Click **Create Web Service**
+
+4. **Wait for build** (~5 minutes)
+
+5. **Use your service URL:**
+   ```
+   https://your-service-name.onrender.com
+   ```
+
+### Limitations (Free Tier)
+- ⏰ Service sleeps after 15 min of inactivity
+- 🐢 Cold start takes ~30-60 seconds
+- 💾 512MB RAM limit
+- 🕐 Sync takes 30-90 seconds per request
+
+## 🛠️ Local Development
+
+### With Docker
 ```bash
-cd subtitle-sync-service
-git init
-git add .
-git commit -m "Initial commit: Subtitle Sync Service"
-git remote add origin https://github.com/YOUR_USERNAME/subtitle-sync-service.git
-git push -u origin main
-```
-
-### Step 2: Deploy to Render.com
-
-1. Go to [render.com](https://render.com) and sign up (free)
-2. Click **"New +"** → **"Web Service"**
-3. Connect your GitHub repository
-4. Render will auto-detect `render.yaml` and configure everything
-5. Click **"Create Web Service"**
-6. Wait ~5 minutes for build and deploy
-
-### Step 3: Get your service URL
-
-After deployment, you'll get a URL like:
-```
-https://subtitle-sync-service.onrender.com
-```
-
-## Limitations (Free Tier)
-
-- **Spin-down**: Service sleeps after 15 min of inactivity
-- **Cold start**: First request after sleep takes ~30-60 seconds
-- **RAM**: 512MB limit
-- **CPU**: Shared CPU
-- **Build time**: 750 free hours/month
-
-## Integration with CinemaVOD
-
-Add to your Android app's `local.properties`:
-```
-SYNC_SERVICE_URL=https://your-service.onrender.com
-```
-
-## Local Development
-
-```bash
-# Build and run with Docker
 docker build -t subtitle-sync .
 docker run -p 8000:8000 subtitle-sync
+```
 
-# Or run directly with Python
+### With Python
+```bash
+# Install ffmpeg first
+brew install ffmpeg  # macOS
+apt install ffmpeg   # Ubuntu
+
+# Install Python dependencies
 pip install -r requirements.txt
+pip install ffsubsync
+
+# Run
 python main.py
 ```
 
-## License
+### Test the API
+```bash
+curl -X POST http://localhost:8000/offset \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stream_url": "https://example.com/video.mp4",
+    "subtitle": "1\n00:00:01,000 --> 00:00:04,000\nTest subtitle\n\n",
+    "language": "en"
+  }'
+```
 
-MIT License
+## 📱 Integration Example (Android/Kotlin)
+
+```kotlin
+suspend fun syncSubtitle(streamUrl: String, subtitleContent: String): Int {
+    val json = JSONObject().apply {
+        put("stream_url", streamUrl)
+        put("subtitle", subtitleContent)
+        put("language", "en")
+    }
+    
+    val request = Request.Builder()
+        .url("https://your-service.onrender.com/offset")
+        .post(json.toString().toRequestBody("application/json".toMediaType()))
+        .build()
+    
+    val response = client.newCall(request).execute()
+    val result = JSONObject(response.body?.string() ?: "{}")
+    
+    return if (result.optBoolean("success")) {
+        result.optInt("offset_ms", 0)
+    } else {
+        0
+    }
+}
+```
+
+## 🔬 Technical Details
+
+### FFSubSync
+- Analyzes first 10 minutes of audio
+- Detects speech patterns using WebRTC VAD
+- Aligns subtitle timing with detected speech
+- More accurate than simple offset detection
+
+### alass (Fallback)
+- Fast subtitle aligner written in Rust
+- Used if FFSubSync fails
+- Simpler algorithm but still effective
+
+### Offset Calculation
+- Compares first 5 subtitle timings
+- Uses **median** offset (more robust than average)
+- Handles variable-speed subtitles
+
+## 📄 License
+
+MIT License - feel free to use in your projects!
+
+## 🙏 Acknowledgments
+
+- [FFSubSync](https://github.com/smacke/ffsubsync) - The core synchronization engine
+- [alass](https://github.com/kaegi/alass) - Fast subtitle aligner fallback
+- [FastAPI](https://fastapi.tiangolo.com/) - Modern Python web framework
