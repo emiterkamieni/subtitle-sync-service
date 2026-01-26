@@ -19,15 +19,16 @@ import re
 import hashlib
 from datetime import datetime
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import shutil
 
 app = FastAPI(
     title="Subtitle Sync Service",
     description="Synchronize subtitles with video streams using audio analysis",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # CORS for app access
@@ -128,22 +129,26 @@ def extract_audio(stream_url: str, output_path: str, duration: int = AUDIO_DURAT
         return False
 
 
-def run_ffsubsync(audio_path: str, subtitle_path: str, output_path: str) -> tuple[bool, str]:
+def run_ffsubsync(reference_path: str, subtitle_path: str, output_path: str, is_text_ref: bool = False) -> tuple[bool, str]:
     """
-    Run ffsubsync to synchronize subtitle with audio.
+    Run ffsubsync to synchronize subtitle with audio or text regex.
     Returns (success, output_log)
     """
     try:
-        print(f"[ffsubsync] Starting synchronization...")
+        print(f"[ffsubsync] Starting synchronization (Text Ref: {is_text_ref})...")
         
         cmd = [
             "ffsubsync",
-            audio_path,
+            reference_path,
             "-i", subtitle_path,
             "-o", output_path,
             "--no-fix-framerate",
             "--max-offset-seconds", "60"  # Allow up to 60s offset
         ]
+        
+        # If we are syncing against text (another SRT), we might need special flags or it just works?
+        # ffsubsync treats the first arg as reference. If it's SRT, it does text-based sync.
+        # But we must ensure it's detected correctly.
         
         result = subprocess.run(
             cmd,
@@ -166,9 +171,9 @@ def run_ffsubsync(audio_path: str, subtitle_path: str, output_path: str) -> tupl
         return False, str(e)
 
 
-def run_alass_sync(audio_path: str, subtitle_path: str, output_path: str) -> tuple[bool, str]:
+def run_alass_sync(reference_path: str, subtitle_path: str, output_path: str) -> tuple[bool, str]:
     """
-    Run alass to synchronize subtitle with audio (fallback).
+    Run alass to synchronize subtitle with audio/text (fallback).
     Returns (success, output_log)
     """
     try:
@@ -176,7 +181,7 @@ def run_alass_sync(audio_path: str, subtitle_path: str, output_path: str) -> tup
         
         cmd = [
             "alass",
-            audio_path,
+            reference_path,
             subtitle_path,
             output_path
         ]
@@ -231,7 +236,7 @@ async def root():
     return {
         "status": "healthy",
         "service": "Subtitle Sync Service",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "audio_duration": AUDIO_DURATION
     }
 
@@ -263,12 +268,7 @@ async def health():
 @app.post("/sync", response_model=SyncResponse)
 async def sync_subtitle(request: SyncRequest):
     """
-    Synchronize subtitle with video stream.
-    
-    This endpoint:
-    1. Downloads first 10 minutes of audio from the stream
-    2. Uses ffsubsync (or alass fallback) to align subtitle with audio
-    3. Returns the offset and/or synchronized subtitle
+    Synchronize subtitle with video stream (Legacy URL method).
     """
     start_time = datetime.now()
     print(f"\n{'='*50}")
@@ -332,6 +332,92 @@ async def sync_subtitle(request: SyncRequest):
             success=True,
             offset_ms=offset_ms,
             synced_subtitle=synced_content,
+            confidence=0.9,
+            message=f"Synchronized successfully. Offset: {offset_ms}ms",
+            processing_time_ms=processing_time
+        )
+
+
+@app.post("/sync_file", response_model=SyncResponse)
+async def sync_subtitle_file(
+    subtitle_file: UploadFile = File(...),
+    reference_file: UploadFile = File(...),
+    language: str = Form("en")
+):
+    """
+    Synchronize subtitle using uploaded reference file (Audio WAV or Subtitle SRT).
+    Bypasses IP restrictions by using client-provided media.
+    """
+    start_time = datetime.now()
+    print(f"\n{'='*50}")
+    print(f"[SYNC_FILE] New request at {start_time}")
+    print(f"[SYNC_FILE] Ref File: {reference_file.filename}, Sub: {subtitle_file.filename}")
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Determine paths
+        ref_filename = reference_file.filename or "reference"
+        sub_filename = subtitle_file.filename or "input.srt"
+        
+        ref_path = os.path.join(tmpdir, ref_filename)
+        sub_path = os.path.join(tmpdir, sub_filename)
+        synced_path = os.path.join(tmpdir, "synced.srt")
+        
+        # Save uploaded files
+        try:
+            with open(ref_path, "wb") as buffer:
+                shutil.copyfileobj(reference_file.file, buffer)
+            
+            with open(sub_path, "wb") as buffer:
+                shutil.copyfileobj(subtitle_file.file, buffer)
+                
+            # Read original subtitle content for offset calc later
+            with open(sub_path, "r", encoding="utf-8", errors="ignore") as f:
+                original_subtitle_content = f.read()
+                
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Failed to save uploaded files: {str(e)}")
+            
+        # Determine sync mode based on reference extension
+        is_text_ref = ref_filename.lower().endswith(".srt") or ref_filename.lower().endswith(".vtt")
+        
+        success = False
+        output_log = ""
+        
+        # 1. Try ffsubsync
+        try:
+            success, output_log = run_ffsubsync(ref_path, sub_path, synced_path, is_text_ref)
+        except FileNotFoundError:
+            print("[SYNC_FILE] ffsubsync not found, trying alass...")
+
+        # 2. Fallback to alass
+        if not success:
+             print("[SYNC_FILE] Trying alass as fallback...")
+             success, output_log = run_alass_sync(ref_path, sub_path, synced_path)
+             
+        if not success:
+            processing_time = int((datetime.now() - start_time).total_seconds() * 1000)
+            return SyncResponse(
+                success=False,
+                offset_ms=0,
+                message=f"Sync failed: {output_log[:200]}",
+                processing_time_ms=processing_time
+            )
+            
+        # Read synced subtitle
+        with open(synced_path, "r", encoding="utf-8", errors="ignore") as f:
+            synced_content = f.read()
+            
+        # Calculate offset
+        offset_ms = calculate_offset_from_srt(original_subtitle_content, synced_content)
+        
+        processing_time = int((datetime.now() - start_time).total_seconds() * 1000)
+        print(f"[SYNC_FILE] Success! Offset: {offset_ms}ms, Time: {processing_time}ms, Ref: {ref_filename}")
+        
+        return SyncResponse(
+            success=True,
+            offset_ms=offset_ms,
+            synced_subtitle=None, # Don't return full sub to save bandwidth, unless requested?
+            # Actually, sometimes we might want it. But for now matching /offset endpoint behavior.
             confidence=0.9,
             message=f"Synchronized successfully. Offset: {offset_ms}ms",
             processing_time_ms=processing_time
