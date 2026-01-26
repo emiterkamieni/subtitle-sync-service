@@ -142,7 +142,7 @@ def run_ffsubsync(reference_path: str, subtitle_path: str, output_path: str, is_
             reference_path,
             "-i", subtitle_path,
             "-o", output_path,
-            "--no-fix-framerate", # Enforce no framerate changes (safer for short clips)
+            # "--no-fix-framerate", # User requested to re-enable framerate fixing
             "--max-offset-seconds", "60"  # Allow up to 60s offset
         ]
         
