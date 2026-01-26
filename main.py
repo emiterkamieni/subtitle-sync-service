@@ -384,8 +384,18 @@ async def sync_subtitle_file(
         output_log = ""
         
         # 1. Try ffsubsync
+        parsed_offset_ms = None
         try:
             success, output_log = run_ffsubsync(ref_path, sub_path, synced_path, is_text_ref)
+            
+            # PARSE OFFSET FROM LOGS (More accurate than SRT comparison if lines dropped)
+            # Log format: INFO     offset seconds: -27.050
+            match = re.search(r"offset seconds:\s+([-0-9.]+)", output_log)
+            if match:
+                offset_sec = float(match.group(1))
+                parsed_offset_ms = int(offset_sec * 1000)
+                print(f"[SYNC_FILE] Parsed offset from log: {parsed_offset_ms}ms")
+                
         except FileNotFoundError:
             print("[SYNC_FILE] ffsubsync not found, trying alass...")
 
@@ -408,7 +418,12 @@ async def sync_subtitle_file(
             synced_content = f.read()
             
         # Calculate offset
-        offset_ms = calculate_offset_from_srt(original_subtitle_content, synced_content)
+        if parsed_offset_ms is not None:
+            # Trusted offset from ffsubsync
+            offset_ms = parsed_offset_ms
+        else:
+            # Fallback calculation (e.g. for alass)
+            offset_ms = calculate_offset_from_srt(original_subtitle_content, synced_content)
         
         processing_time = int((datetime.now() - start_time).total_seconds() * 1000)
         print(f"[SYNC_FILE] Success! Offset: {offset_ms}ms, Time: {processing_time}ms, Ref: {ref_filename}")
