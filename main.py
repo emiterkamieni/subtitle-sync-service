@@ -142,7 +142,7 @@ def run_ffsubsync(reference_path: str, subtitle_path: str, output_path: str, is_
             reference_path,
             "-i", subtitle_path,
             "-o", output_path,
-            "--no-fix-framerate",
+            # "--no-fix-framerate", # Allow framerate fixing for better results
             "--max-offset-seconds", "60"  # Allow up to 60s offset
         ]
         
@@ -431,8 +431,7 @@ async def sync_subtitle_file(
         return SyncResponse(
             success=True,
             offset_ms=offset_ms,
-            synced_subtitle=None, # Don't return full sub to save bandwidth, unless requested?
-            # Actually, sometimes we might want it. But for now matching /offset endpoint behavior.
+            synced_subtitle=synced_content, # Return full content for complete replacement
             confidence=0.9,
             message=f"Synchronized successfully. Offset: {offset_ms}ms",
             processing_time_ms=processing_time
